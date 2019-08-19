@@ -518,6 +518,197 @@ class WPS_Random_Posts extends WP_CLI_Command {
 			WP_CLI::error( sprintf( "Role doesn't exist: %s", $role ) );
 		}
 	}
+
+	/**
+	 * Generate random comments.
+	 *
+	 * Create a random number of comments (min/max)
+	 * for posts of a specific post_type, or a specific post ID,
+	 * by a random comment_author
+	 * within a date range (min/max)
+	 * with a max_depth (for hierarchichal comments)
+	 * with a random number of body paragraphs (min/max).
+	 *
+	 * ## OPTIONS
+	 * [--post_type=<type>]
+     * : The type of posts to target.
+     * ---
+     * default: post
+     * ---
+	 *
+	 * [--post_count=<number>]
+     * : How many posts to comment on.
+     * ---
+     * default: 100
+     * ---
+     *
+	 * [--post_id=<ID>]
+     * : Target a specific post only.
+     * ---
+     * default: all
+     * ---
+     *
+	 * [--min_count=<number>]
+     * : Minimum number of comments to generate per post.
+     * ---
+     * default: 0
+     * ---
+     *
+	 * [--max_count=<number>]
+     * : Max number of comments to generate per post
+     * ---
+     * default: 50
+     * ---
+     *
+     * [--comment_type=<type>]
+     * : The type of the generated comments.
+     * ---
+     * default: post
+     * ---
+     *
+     * [--comment_status=<status>]
+     * : The status of the generated comments.
+     * ---
+     * default: publish
+     * ---
+	 *
+     * [--max_depth=<number>]
+     * : For threaded comments, generate child comments down to a certain depth (default is pulled from Settings > Discussion).
+     *
+     * [--min_length=<number>]
+     * : The minimum length of the generated comments (in paragraphs).
+     * ---
+     * default: 1
+     * ---
+	 *
+	 * [--max_length=<number>]
+     * : The maximum length of the generated comments (in paragraphs).
+     * ---
+     * default: 5
+     * ---
+	 */
+	public function generate_comments( $args = array(), $assoc_args = array() ) {
+
+		$this->assoc_args = wp_parse_args( $assoc_args, [
+			'post_type'      => 'post',
+			'post_id'        => 0,
+			'post_count'     => 100,
+			'min_count'      => 0,
+			'max_count'      => 50,
+			'comment_status' => 'publish',
+			'min_date'       => false,
+			'max_date'       => current_time( 'mysql' ),
+			'max_depth'      => get_option( 'thread_comments_depth' ),
+			'min_length'     => 1,
+			'max_length'     => 5,
+		] );
+
+		$posts = [];
+
+		// Confirm post type is valid
+		if ( ! post_type_exists( $this->assoc_args['post_type'] ) ) {
+			WP_CLI::error( sprintf( 'The %s post type does not exist.', $this->assoc_args['post_type'] ) );
+		}
+
+		// Fetch one post if given specific ID
+		if ( 0 != $this->assoc_args['post_id'] ) {
+			$post = get_post($this->assoc_args['post_id'] );
+
+			// Confirm post ID exists
+			if ( ! ( $post instanceof WP_Post ) ) {
+				WP_CLI::error( sprintf( 'The post ID %d does not exist.', $this->assoc_args['post_id'] ) );
+			}
+
+			$this->assoc_args['post_type'] = $post->post_type;
+			$posts = [ $post ];
+
+		// Otherwise, get a lot of posts
+		} else {
+			$posts = get_posts(
+				[
+					'post_type' => $this->assoc_args['post_type'],
+					'posts_per_page' =>  $this->assoc_args['post_count'],
+				]
+			);
+		}
+
+		// Setup nonsentences
+		$this->nonsentences->min_paragraphs = $this->assoc_args['min_length'];
+		$this->nonsentences->max_paragraphs = $this->assoc_args['max_length'];
+
+		// Add comments to each post
+		foreach( $posts as $post ) {
+
+			$this->assoc_args['post_id'] = $post->ID;
+			$this->assoc_args['previous_comment_id'] = 0;
+			$this->assoc_args['comment_parent'] = 0;
+			$this->assoc_args['current_depth'] = 0;
+			$this->assoc_args['min_date'] = $post->post_date;
+
+			// Pick a random number of comments to generate from min/max
+			$comment_count = rand( $this->assoc_args['min_count'], $this->assoc_args['max_count'] );
+
+			$progress = \WP_CLI\Utils\make_progress_bar( sprintf(
+				_n( 'Generating %1$d comment on %2$s %3$d: %4$s.', 'Generating %1$d comments on %2$s %3$d: %4$s.', $comment_count, 'wp-cli-random-content' ),
+				$comment_count,
+				$post->post_type,
+				$post->ID,
+				$post->post_title
+			), count( $posts ) );
+
+			for ( $i = 0; $i < $comment_count; $i++ ) {
+				$this->maybe_update_comment_hierarchy();
+				$comment_id = $this->insert_comment();
+				$this->assoc_args['previous_comment_id'] = $comment_id;
+				$progress->tick();
+			}
+
+			$progress->finish();
+		}
+	}
+
+	private function insert_comment() {
+
+		// Setup user data
+		$first_name = $this->nonsentences->get_word( 'names-first' );
+		$last_name = $this->nonsentences->get_word( 'names-last' );
+		$comment_author = "{$first_name} {$last_name}";
+		$username = sanitize_title( $comment_author );
+		$comment_author_email = "{$username}@example.com";
+		$comment_author_url = $this->maybe_reset_depth() ? "https://{$username}.example.com" : 'https://';
+		$comment_date = $this->get_random_post_date( $this->assoc_args['min_date'] , $this->assoc_args['max_date'] );
+
+		return wp_insert_comment( [
+			'comment_post_ID' => $this->assoc_args['post_id'],
+			'comment_author' => $comment_author,
+			'comment_author_email' => $comment_author_email,
+			'comment_author_url' => $comment_author_url,
+			'comment_content' => $this->nonsentences->paragraphs(),
+			'comment_type' => '',
+			'comment_approved' => 1,
+			'comment_parent' => $this->assoc_args['comment_parent'],
+			'user_id' => 0,
+			'comment_author_IP' => '127.0.0.1',
+			'comment_agent' => 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.10) Gecko/2009042316 Firefox/3.0.10 (.NET CLR 3.5.30729)',
+			'comment_date' => $comment_date,
+		] );
+	}
+
+	private function maybe_update_comment_hierarchy() {
+
+		// Bail if comments aren't threaded
+		if ( ! get_option( 'thread_comments', 0 ) ) {
+			WP_CLI::error( 'No threaded comments' );
+		}
+
+		if ( $this->maybe_make_child() && $this->assoc_args['current_depth'] < $this->assoc_args['max_depth'] ) {
+			$this->assoc_args['comment_parent'] = $this->assoc_args['previous_comment_id'];
+			$this->assoc_args['current_depth']++;
+		} elseif ( $this->maybe_reset_depth() ) {
+			$this->assoc_args['comment_parent'] = 0;
+			$this->assoc_args['current_depth'] = 1;
+		}
+	}
 }
 WP_CLI::add_command( 'random', 'WPS_Random_Posts' );
 
